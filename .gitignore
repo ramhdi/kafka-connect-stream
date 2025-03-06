@@ -1,0 +1,71 @@
+# Scala / SBT
+target/
+lib_managed/
+src_managed/
+project/boot/
+project/target/
+project/plugins/project/
+project/.bloop/
+.bsp/
+.scala-build/
+
+# Logs
+*.log
+logs/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/
+.metals/
+.bloop/
+
+# Eclipse
+.classpath
+.project
+.settings/
+.cache
+bin/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Docker
+docker/**/*.jar
+*.env
+
+# Kafka Connect
+connect-plugins/
+
+# Application specific
+connectors/
+docker/connectors/
+
+# Assembly JAR that should be built, not committed
+*-assembly-*.jar
+
+# Local configuration that might contain secrets
+local.conf
+*.properties.local
+
+# Temporary files
+*.swp
+*.swo
+*~
+.ensime
+.ensime_cache/

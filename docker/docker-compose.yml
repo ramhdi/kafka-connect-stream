@@ -1,0 +1,104 @@
+version: '3'
+services:
+  # Zookeeper (required for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # Kafka broker
+  broker:
+    image: confluentinc/cp-kafka:7.3.2
+    hostname: broker
+    container_name: broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"  # External access
+      - "9092:9092"    # Internal access
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  # Kafka Connect
+  connect:
+    image: confluentinc/cp-kafka-connect:7.3.2
+    hostname: connect
+    container_name: connect
+    depends_on:
+      - broker
+    ports:
+      - "8083:8083"  # Connect REST API
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'broker:9092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/connectors"
+      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    volumes:
+      - ./connectors:/connectors  # Mount for custom connectors
+
+  # Kafka Connect UI
+  connect-ui:
+    image: landoop/kafka-connect-ui:0.9.7
+    hostname: connect-ui
+    container_name: connect-ui
+    ports:
+      - "8000:8000"
+    environment:
+      CONNECT_URL: "http://connect:8083"
+      PROXY: "true"
+    depends_on:
+      - connect
+
+  # AKHQ - Kafka GUI
+  akhq:
+    image: tchiotludo/akhq:0.20.0
+    container_name: akhq
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "broker:9092"
+              connect:
+                - name: "connect"
+                  url: "http://connect:8083"
+    ports:
+      - "8008:8080"
+    depends_on:
+      - broker
+      - connect
