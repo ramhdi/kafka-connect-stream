@@ -36,6 +36,23 @@ services:
         limits:
           memory: 768M
 
+  # Topic Creation
+  topic-creator:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: topic-creator
+    depends_on:
+      - broker
+    command: >
+      bash -c "
+        echo 'Waiting for Kafka to be ready...' &&
+        cub kafka-ready -b broker:9092 1 40 &&
+        echo 'Creating topics...' &&
+        kafka-topics --bootstrap-server broker:9092 --create --if-not-exists --topic rest-data --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server broker:9092 --create --if-not-exists --topic processed-users --partitions 3 --replication-factor 1 &&
+        echo 'Topics created.' &&
+        exit 0
+      "
+
   # Kafka Connect
   connect:
     image: confluentinc/cp-kafka-connect:7.3.2
@@ -43,6 +60,7 @@ services:
     container_name: connect
     depends_on:
       - broker
+      - topic-creator
     ports:
       - "8083:8083"  # Connect REST API
     environment:
@@ -102,3 +120,22 @@ services:
     depends_on:
       - broker
       - connect
+
+  # Kafka Stream Processor for User Data
+  user-processor:
+    image: openjdk:17-slim
+    container_name: user-processor
+    depends_on:
+      - broker
+      - topic-creator
+    volumes:
+      - ./streams/kafka-user-processor-assembly-0.1.jar:/app/processor.jar
+      - ./streams/data:/tmp/kafka-streams-user-processor
+    command: >
+      java -Xmx256m -jar /app/processor.jar
+      broker:9092 rest-data processed-users
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M

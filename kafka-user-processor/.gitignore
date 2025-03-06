@@ -47,7 +47,6 @@ Desktop.ini
 
 # Docker
 docker/**/*.jar
-docker/streams
 *.env
 
 # Kafka Connect
