@@ -10,6 +10,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
 
   # Kafka broker
   broker:
@@ -35,6 +40,27 @@ services:
       resources:
         limits:
           memory: 768M
+    restart: unless-stopped
+
+  # Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.3.2
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      - broker
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'broker:9092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx256M -Xms128M"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    restart: unless-stopped
 
   # Topic Creation
   topic-creator:
@@ -52,6 +78,10 @@ services:
         echo 'Topics created.' &&
         exit 0
       "
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # Kafka Connect
   connect:
@@ -60,6 +90,7 @@ services:
     container_name: connect
     depends_on:
       - broker
+      - schema-registry
       - topic-creator
     ports:
       - "8083:8083"  # Connect REST API
@@ -71,8 +102,11 @@ services:
       CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
       CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
       CONNECT_STATUS_STORAGE_TOPIC: connect-status
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      # Using Avro converter with Schema Registry
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
       CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/connectors"
@@ -80,13 +114,14 @@ services:
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_HEAP_OPTS: "-Xmx384M -Xms256M"
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
     volumes:
       - ./connectors:/connectors  # Mount for custom connectors
+    restart: unless-stopped
 
   # Kafka Connect UI
   connect-ui:
@@ -100,6 +135,11 @@ services:
       PROXY: "true"
     depends_on:
       - connect
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
 
   # AKHQ - Kafka GUI
   akhq:
@@ -112,14 +152,23 @@ services:
             docker-kafka-server:
               properties:
                 bootstrap.servers: "broker:9092"
+              schema-registry:
+                url: "http://schema-registry:8081"
               connect:
                 - name: "connect"
                   url: "http://connect:8083"
+      JAVA_OPTS: "-Xms128M -Xmx384M"
     ports:
       - "8008:8080"
     depends_on:
       - broker
+      - schema-registry
       - connect
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
 
   # Kafka Stream Processor for User Data
   user-processor:
@@ -127,15 +176,16 @@ services:
     container_name: user-processor
     depends_on:
       - broker
+      - schema-registry
       - topic-creator
     volumes:
       - ./streams/kafka-user-processor-assembly-0.1.jar:/app/processor.jar
       - ./streams/data:/tmp/kafka-streams-user-processor
     command: >
-      java -Xmx256m -jar /app/processor.jar
-      broker:9092 rest-data processed-users
-    restart: unless-stopped
+      java -Xms256m -Xmx384m -jar /app/processor.jar
+      broker:9092 schema-registry:8081 rest-data processed-users
     deploy:
       resources:
         limits:
           memory: 512M
+    restart: unless-stopped

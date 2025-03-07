@@ -1,10 +1,15 @@
 package com.example.kafka.streams
 
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig}
-import org.apache.kafka.streams.scala.{StreamsBuilder, Serdes}
+import org.apache.kafka.streams.scala.{
+  StreamsBuilder,
+  Serdes,
+  ImplicitConversions,
+  kstream
+}
 import org.apache.kafka.streams.scala.ImplicitConversions._
 import org.apache.kafka.streams.scala.serialization.Serdes._
-import org.apache.kafka.streams.kstream.{Materialized, Produced}
+import org.apache.kafka.streams.kstream.{Consumed, Produced}
 import org.apache.kafka.streams.state.{KeyValueStore, StoreBuilder, Stores}
 import org.apache.kafka.streams.processor.ProcessorContext
 import org.apache.kafka.common.serialization.{Serde, Serdes => JSerdes}
@@ -16,22 +21,45 @@ import java.time.format.DateTimeFormatter
 import java.util.{Collections, Properties}
 import java.util.concurrent.CountDownLatch
 
+// Import for Java conversions
+import scala.jdk.CollectionConverters._
+
 import spray.json._
 import DefaultJsonProtocol._
 
+// Add Avro imports
+import io.confluent.kafka.streams.serdes.avro.GenericAvroSerde
+import io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig
+import org.apache.avro.generic.{GenericData, GenericRecord}
+
+import com.example.kafka.streams.EnrichedUserSchema.{
+  geoSchema,
+  addressSchema,
+  companySchema,
+  enrichedUserSchema
+}
+
 object UserDataProcessor extends App {
-  if (args.length < 3) {
+  if (args.length < 4) {
     System.err.println(
-      "Usage: UserDataProcessor <bootstrap-servers> <input-topic> <output-topic>"
+      "Usage: UserDataProcessor <bootstrap-servers> <schema-registry-url> <input-topic> <output-topic>"
     )
     System.exit(1)
   }
 
   val bootstrapServers = args(0)
-  val inputTopic = args(1)
-  val outputTopic = args(2)
+  // Add http:// prefix to the schema registry URL if it doesn't already have it
+  val schemaRegistryUrl =
+    if (args(1).startsWith("http://") || args(1).startsWith("https://")) {
+      args(1)
+    } else {
+      s"http://${args(1)}"
+    }
+  val inputTopic = args(2)
+  val outputTopic = args(3)
 
   println(s"Connecting to Kafka at $bootstrapServers")
+  println(s"Schema Registry URL: $schemaRegistryUrl")
   println(s"Reading from topic: $inputTopic")
   println(s"Writing to topic: $outputTopic")
 
@@ -83,14 +111,13 @@ object UserDataProcessor extends App {
   val props = new Properties()
   props.put(StreamsConfig.APPLICATION_ID_CONFIG, "user-data-processor")
   props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+
+  // Configure for Avro serialization with proper URL
   props.put(
-    StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG,
-    JSerdes.String().getClass.getName
+    AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG,
+    schemaRegistryUrl
   )
-  props.put(
-    StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG,
-    JSerdes.String().getClass.getName
-  )
+
   props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
   props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0)
   props.put(
@@ -114,60 +141,79 @@ object UserDataProcessor extends App {
     )
   builder.addStateStore(storeBuilder)
 
-  // Process the input stream
-  val userStream = builder.stream[String, String](inputTopic)
+  // Configure Avro SerDes with Schema Registry
+  val schemaRegistryConfig = Map[String, String](
+    AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG -> schemaRegistryUrl
+  ).asJava
+
+  // Input Avro SerDe
+  val inputAvroSerde = new GenericAvroSerde()
+  inputAvroSerde.configure(
+    schemaRegistryConfig,
+    false
+  ) // false = for values, not keys
+
+  // Output Avro SerDe - will be used for our enriched data
+  val outputAvroSerde = new GenericAvroSerde()
+  outputAvroSerde.configure(
+    schemaRegistryConfig,
+    false
+  ) // false = for values, not keys
+
+  // Process the input stream with Avro deserialization
+  val userStream = builder.stream[String, GenericRecord](inputTopic)(
+    Consumed.`with`(JSerdes.String(), inputAvroSerde)
+  )
 
   // Extract key for debugging
   userStream.foreach { (key, value) =>
     println(
-      s"Received message - Key: $key, Value preview: ${value.take(100)}..."
+      s"Received message - Key: $key, Value preview: ${value.toString.take(100)}..."
     )
   }
 
-  val enrichedStream = userStream
-    .mapValues { jsonStr =>
+  userStream
+    .mapValues { avroRecord =>
       try {
-        // Manual extraction of the payload from Kafka Connect JSON format
-        val rawJson = jsonStr.parseJson.asJsObject
+        // Extract fields from Avro record
+        val id = avroRecord.get("id").toString.toInt
+        val name = avroRecord.get("name").toString
+        val username = avroRecord.get("username").toString
+        val email = avroRecord.get("email").toString
+        val phone = avroRecord.get("phone").toString
+        val website = avroRecord.get("website").toString
 
-        // Extract the payload field which contains the actual data
-        val payload = rawJson.fields("payload").asJsObject
+        // Extract address from Avro record
+        val addressRecord =
+          avroRecord.get("address").asInstanceOf[GenericRecord]
+        val street = addressRecord.get("street").toString
+        val suite = addressRecord.get("suite").toString
+        val city = addressRecord.get("city").toString
+        val zipcode = addressRecord.get("zipcode").toString
 
-        // Extract all the fields manually
-        val id = payload.fields("id").convertTo[Int]
-        val name = payload.fields("name").convertTo[String]
-        val username = payload.fields("username").convertTo[String]
-        val email = payload.fields("email").convertTo[String]
-        val phone = payload.fields("phone").convertTo[String]
-        val website = payload.fields("website").convertTo[String]
-
-        // Extract address
-        val addressObj = payload.fields("address").asJsObject
-        val street = addressObj.fields("street").convertTo[String]
-        val suite = addressObj.fields("suite").convertTo[String]
-        val city = addressObj.fields("city").convertTo[String]
-        val zipcode = addressObj.fields("zipcode").convertTo[String]
-
-        // Extract geo
-        val geoObj = addressObj.fields("geo").asJsObject
-        val lat = geoObj.fields("lat").convertTo[String]
-        val lng = geoObj.fields("lng").convertTo[String]
+        // Extract geo from Avro record
+        val geoRecord = addressRecord.get("geo").asInstanceOf[GenericRecord]
+        val lat = geoRecord.get("lat").toString
+        val lng = geoRecord.get("lng").toString
         val geo = Geo(lat, lng)
 
         val address = Address(street, suite, city, zipcode, geo)
 
-        // Extract company
-        val companyObj = payload.fields("company").asJsObject
-        val companyName = companyObj.fields("name").convertTo[String]
-        val catchPhrase = companyObj.fields("catchPhrase").convertTo[String]
-        val bs = companyObj.fields("bs").convertTo[String]
+        // Extract company from Avro record
+        val companyRecord =
+          avroRecord.get("company").asInstanceOf[GenericRecord]
+        val companyName = companyRecord.get("name").toString
+        val catchPhrase = companyRecord.get("catchPhrase").toString
+        val bs = companyRecord.get("bs").toString
         val company = Company(companyName, catchPhrase, bs)
 
         // Create User object
         User(id, name, username, email, address, phone, website, company)
       } catch {
         case e: Exception =>
-          println(s"Failed to parse JSON: ${jsonStr.take(500)}...")
+          println(
+            s"Failed to parse Avro record: ${avroRecord.toString.take(500)}..."
+          )
           println(s"Error: ${e.getMessage}")
           e.printStackTrace()
           throw e
@@ -175,15 +221,50 @@ object UserDataProcessor extends App {
     }
     .transformValues(
       () => new UserEnricher(),
-      "user-counts"
+      "user-counts" // Name of the state store to connect
     )
     .mapValues { enrichedUser =>
-      // Create a simple JSON without schema wrapper for output
-      enrichedUser.toJson.compactPrint
-    }
+      // Convert EnrichedUser to Avro GenericRecord instead of JSON string
+      val record: GenericRecord = new GenericData.Record(enrichedUserSchema)
+      record.put("id", enrichedUser.id)
+      record.put("name", enrichedUser.name)
+      record.put("username", enrichedUser.username)
+      record.put("email", enrichedUser.email)
 
-  // Send to output topic
-  enrichedStream.to(outputTopic)
+      // Create address record
+      val addressRecord: GenericRecord = new GenericData.Record(addressSchema)
+      addressRecord.put("street", enrichedUser.address.street)
+      addressRecord.put("suite", enrichedUser.address.suite)
+      addressRecord.put("city", enrichedUser.address.city)
+      addressRecord.put("zipcode", enrichedUser.address.zipcode)
+
+      // Create geo record
+      val geoRecord: GenericRecord = new GenericData.Record(geoSchema)
+      geoRecord.put("lat", enrichedUser.address.geo.lat)
+      geoRecord.put("lng", enrichedUser.address.geo.lng)
+
+      addressRecord.put("geo", geoRecord)
+      record.put("address", addressRecord)
+
+      // Add remaining flat fields
+      record.put("phone", enrichedUser.phone)
+      record.put("website", enrichedUser.website)
+
+      // Create company record
+      val companyRecord: GenericRecord = new GenericData.Record(companySchema)
+      companyRecord.put("name", enrichedUser.company.name)
+      companyRecord.put("catchPhrase", enrichedUser.company.catchPhrase)
+      companyRecord.put("bs", enrichedUser.company.bs)
+
+      record.put("company", companyRecord)
+      record.put("timestamp", enrichedUser.timestamp)
+      record.put("count", enrichedUser.count)
+
+      record
+    }
+    .to(outputTopic)(
+      Produced.`with`(JSerdes.String(), outputAvroSerde)
+    )
 
   // Build the topology
   val topology = builder.build()
@@ -214,13 +295,14 @@ object UserDataProcessor extends App {
       System.exit(1)
   }
 
-  // User enricher transformer with state
+  // User enricher with ValueTransformerWithKey interface
   class UserEnricher
       extends org.apache.kafka.streams.kstream.ValueTransformerWithKey[
         String,
         User,
         EnrichedUser
       ] {
+
     private var stateStore: KeyValueStore[String, java.lang.Long] = _
     private var context: ProcessorContext = _
 
