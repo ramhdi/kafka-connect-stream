@@ -38,6 +38,7 @@ import com.example.kafka.streams.EnrichedUserSchema.{
   companySchema,
   enrichedUserSchema
 }
+import com.example.kafka.streams.EnrichedUserSchema.keySchema
 
 object UserDataProcessor extends App {
   if (args.length < 4) {
@@ -153,6 +154,12 @@ object UserDataProcessor extends App {
     false
   ) // false = for values, not keys
 
+  val keyAvroSerde = new GenericAvroSerde()
+  keyAvroSerde.configure(
+    schemaRegistryConfig,
+    true // true = for keys
+  )
+
   // Output Avro SerDe - will be used for our enriched data
   val outputAvroSerde = new GenericAvroSerde()
   outputAvroSerde.configure(
@@ -262,8 +269,16 @@ object UserDataProcessor extends App {
 
       record
     }
+    .selectKey { (_, enrichedUser) =>
+      val keyRecord = new GenericData.Record(keySchema)
+      keyRecord.put("id", enrichedUser.get("id"))
+      keyRecord
+    }
     .to(outputTopic)(
-      Produced.`with`(JSerdes.String(), outputAvroSerde)
+      Produced.`with`(
+        keyAvroSerde.asInstanceOf[Serde[GenericData.Record]],
+        outputAvroSerde.asInstanceOf[Serde[GenericRecord]]
+      )
     )
 
   // Build the topology

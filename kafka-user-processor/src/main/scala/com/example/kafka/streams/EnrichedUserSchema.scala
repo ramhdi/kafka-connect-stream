@@ -57,4 +57,11 @@ object EnrichedUserSchema {
     .requiredString("timestamp")
     .requiredLong("count")
     .endRecord()
+
+  val keySchema = SchemaBuilder
+    .record("UserId")
+    .namespace("com.example.models")
+    .fields()
+    .requiredInt("id")
+    .endRecord()
 }
